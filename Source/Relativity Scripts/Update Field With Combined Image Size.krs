@@ -1,0 +1,103 @@
+<script>
+	<name>Update Field With Combined Image Size</name>
+	<description>This Relativity script will store the combined file size of production and non-production images (in KB) for each case document in a decimal field.</description>
+	<category>Case Functionality</category>
+	<version>6</version>
+	<input>
+		<field id="CombinedImageSize" name="Combined Image Size:">
+			<filters>
+				<type>6</type>
+				<category>0</category>
+			</filters>
+		</field>
+		<constant id="ClearPrevious" name="Clear Previous Values:" type="text" required="true">
+			<option>No</option>
+			<option>Yes</option>
+		</constant>
+	</input>
+	<action returns="table" timeout="1200"><![CDATA[
+
+
+DECLARE @batchAmount INT SET @batchAmount = 10000
+DECLARE @rowsAffected INT 
+DECLARE @totalDocsUpdated INT SET @totalDocsUpdated = 0
+
+--For verylarge document set (3 million) script was running very long
+-- created an index on the column.  The index took about 5 minutes to create, but then the script ran in 3:26 seconds
+IF NOT EXISTS (SELECT name FROM sys.indexes WHERE name = N'IX_SCIS_Document_CombinedImageCount')
+	CREATE INDEX IX_SCIS_Document_CombinedImageCount ON Document ([#CombinedImageSize#])
+	
+IF '#ClearPrevious#' = 'Yes' BEGIN
+
+	SET @rowsAffected = 1
+
+	WHILE @rowsAffected > 0 BEGIN
+
+		UPDATE TOP(@batchAmount) Document SET [#CombinedImageSize#] = 0.0 WHERE ISNULL([#CombinedImageSize#], 0) > 0
+		SET @rowsAffected = @@ROWCOUNT
+
+	END
+END
+
+--Add Temp table to hold sum of filesizes by type
+IF EXISTS
+ (
+ SELECT *
+ FROM tempdb.dbo.sysobjects
+ WHERE ID = OBJECT_ID(N'tempdb..#ImageFileSize')
+ )
+ BEGIN
+	DROP TABLE #ImageFileSize
+ END
+
+CREATE TABLE #ImageFileSize
+(
+	 DocumentArtifactID INT
+	,CombinedImageSize DECIMAL(38,2) 
+)
+
+IF EXISTS (SELECT name FROM sys.indexes WHERE name = N'IX_SCIS_ImageFileSize_DocumentArtifactID')
+    DROP INDEX IX_SCIS_ImageFileSize_DocumentArtifactID ON #ImageFileSize
+
+
+CREATE INDEX IX_SCIS_ImageFileSize_DocumentArtifactID ON #ImageFileSize (DocumentArtifactID)
+	
+INSERT INTO
+	#ImageFileSize
+	SELECT 
+		DocumentArtifactID
+		, ISNULL((CONVERT(DECIMAL(38,2), SUM([Size]))/1024), 0.0)
+	FROM
+		[File] F WITH(NOLOCK)
+	WHERE
+		F.[Type] IN (1,3)
+	GROUP BY 
+		DocumentArtifactID
+	
+SET @rowsAffected = 1
+
+WHILE @rowsAffected > 0 BEGIN
+		
+		UPDATE 
+			TOP(@batchAmount) Document
+		SET 
+			Document.[#CombinedImageSize#] = FileSize.CombinedImageSize
+		FROM 
+			[Document] D (NOLOCK)
+			INNER JOIN
+			#ImageFileSize FileSize (NOLOCK)
+				ON D.ArtifactID = FileSize.DocumentArtifactID
+		WHERE
+			ISNULL(D.[#CombinedImageSize#],0) = 0
+	
+		
+			
+		SET @rowsAffected = @@ROWCOUNT
+		SET @totalDocsUpdated = @totalDocsUpdated + @rowsAffected
+
+END
+
+SELECT 'Succesfully updated ' + CAST(@totalDocsUpdated AS VARCHAR(100)) + ' documents'
+
+	]]></action>
+</script>
